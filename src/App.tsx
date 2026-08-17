@@ -117,7 +117,6 @@ function App() {
 
   useEffect(() => {
     localStorage.setItem('trippiece:route-stops', JSON.stringify(routeStops))
-    setRouteInfo(null)
   }, [routeStops])
 
   useEffect(() => {
@@ -315,6 +314,7 @@ function App() {
   }
 
   const toggleRouteStop = (place: Place) => {
+    setRouteInfo(null)
     setRouteStops((current) => {
       if (current.some((item) => item.id === place.id)) {
         return current.filter((item) => item.id !== place.id)
@@ -328,6 +328,7 @@ function App() {
   }
 
   const moveRouteStop = (index: number, direction: -1 | 1) => {
+    setRouteInfo(null)
     setRouteStops((current) => {
       const target = index + direction
       if (target < 0 || target >= current.length) return current
