@@ -8,10 +8,11 @@ declare global {
   }
 }
 
-type Tab = 'map' | 'saved' | 'routes'
-type RouteBuilderStep = 'pick' | 'arrange'
+type Tab = 'map' | 'bookmarks' | 'courses'
+type BookmarkMode = 'browse' | 'select'
 type CategoryId = 'all' | 'cafe' | 'food' | 'culture' | 'park' | 'bar' | 'shop'
-type SavedCategoryId = Exclude<CategoryId, 'all'> | 'other'
+type BookmarkCategoryId = 'food' | 'cafe' | 'culture' | 'park' | 'bar' | 'shop' | 'other'
+type RouteOrigin = 'bookmarks' | 'courses'
 
 type Place = {
   id: string
@@ -50,7 +51,7 @@ const API_BASE = import.meta.env.DEV ? 'https://trippiece.pages.dev' : ''
 const DEFAULT_CENTER = { lat: 37.5665, lng: 126.978 }
 const MAX_ROUTE_STOPS = 7
 
-const categories: { id: CategoryId; label: string }[] = [
+const mapCategories: { id: CategoryId; label: string }[] = [
   { id: 'all', label: '전체' },
   { id: 'cafe', label: '카페' },
   { id: 'food', label: '식사' },
@@ -60,11 +61,11 @@ const categories: { id: CategoryId; label: string }[] = [
   { id: 'shop', label: '쇼핑' },
 ]
 
-const savedCategoryOrder: { id: SavedCategoryId; label: string }[] = [
+const bookmarkCategories: { id: BookmarkCategoryId; label: string }[] = [
+  { id: 'food', label: '먹기' },
   { id: 'cafe', label: '카페' },
-  { id: 'food', label: '식사' },
-  { id: 'culture', label: '전시·문화' },
-  { id: 'park', label: '산책·공원' },
+  { id: 'culture', label: '볼거리' },
+  { id: 'park', label: '산책' },
   { id: 'bar', label: '술' },
   { id: 'shop', label: '쇼핑' },
   { id: 'other', label: '기타' },
@@ -81,7 +82,7 @@ function readStorage<T>(key: string, fallback: T): T {
 
 function formatDistance(meters: number | null) {
   if (meters == null) return ''
-  if (meters < 1000) return `${meters}m`
+  if (meters < 1000) return `${Math.round(meters)}m`
   return `${(meters / 1000).toFixed(1)}km`
 }
 
@@ -93,17 +94,22 @@ function formatDuration(seconds: number) {
   return rest ? `${hours}시간 ${rest}분` : `${hours}시간`
 }
 
-function savedCategoryFor(place: Place): SavedCategoryId {
+function bookmarkCategoryFor(place: Place): BookmarkCategoryId {
   const text = `${place.category} ${place.categoryGroup} ${place.name}`.toLowerCase()
 
-  if (/와인|칵테일|펍|주점|술집|바\b/.test(text)) return 'bar'
-  if (place.categoryGroupCode === 'CE7' || /카페|커피|디저트|베이커리/.test(text)) return 'cafe'
-  if (place.categoryGroupCode === 'FD6' || /음식점|맛집|식당|레스토랑/.test(text)) return 'food'
-  if (/공원|산책|숲|정원|자연|수목원/.test(text)) return 'park'
-  if (place.categoryGroupCode === 'CT1' || /전시|미술관|박물관|갤러리|공연|문화/.test(text)) return 'culture'
-  if (/쇼핑|편집숍|편집샵|소품|백화점|시장|스토어/.test(text)) return 'shop'
-  if (place.categoryGroupCode === 'AT4') return 'culture'
+  if (/와인|칵테일|펍|주점|술집|포차|bar\b/.test(text)) return 'bar'
+  if (place.categoryGroupCode === 'CE7' || /카페|커피|디저트|베이커리|제과/.test(text)) return 'cafe'
+  if (place.categoryGroupCode === 'FD6' || /음식점|맛집|식당|레스토랑|한식|양식|일식|중식/.test(text)) return 'food'
+  if (/공원|산책|숲|정원|수목원|둘레길|한강/.test(text)) return 'park'
+  if (place.categoryGroupCode === 'CT1' || place.categoryGroupCode === 'AT4' || /전시|미술관|박물관|갤러리|공연|문화|극장|영화관|체험/.test(text)) return 'culture'
+  if (/쇼핑|편집숍|편집샵|소품|백화점|시장|스토어|상점|문구/.test(text)) return 'shop'
   return 'other'
+}
+
+function routeTitle(stops: Place[]) {
+  if (stops.length === 0) return '새 동선'
+  if (stops.length === 1) return stops[0].name
+  return `${stops[0].name} → ${stops[stops.length - 1].name}`
 }
 
 function App() {
@@ -116,35 +122,40 @@ function App() {
   const [error, setError] = useState('')
   const [mapReady, setMapReady] = useState(false)
   const [searchAreaDirty, setSearchAreaDirty] = useState(false)
+
   const [savedPlaces, setSavedPlaces] = useState<Place[]>(() =>
     readStorage('trippiece:saved-places', []),
-  )
-  const [routeStops, setRouteStops] = useState<Place[]>(() =>
-    readStorage('trippiece:route-stops', []),
-  )
-  const [routeInfo, setRouteInfo] = useState<RouteInfo | null>(() =>
-    readStorage('trippiece:route-info', null),
   )
   const [savedRoutes, setSavedRoutes] = useState<SavedRoute[]>(() =>
     readStorage('trippiece:saved-routes', []),
   )
+
+  const [bookmarkMode, setBookmarkMode] = useState<BookmarkMode>('browse')
+  const [selectedBookmarkIds, setSelectedBookmarkIds] = useState<string[]>([])
+
+  const [routeEditorOpen, setRouteEditorOpen] = useState(false)
+  const [routeOrigin, setRouteOrigin] = useState<RouteOrigin>('bookmarks')
+  const [editingRouteId, setEditingRouteId] = useState<string | null>(null)
+  const [routeStops, setRouteStops] = useState<Place[]>([])
+  const [routeInfo, setRouteInfo] = useState<RouteInfo | null>(null)
   const [routeLoading, setRouteLoading] = useState(false)
-  const [routeBuilderOpen, setRouteBuilderOpen] = useState(false)
-  const [routeBuilderStep, setRouteBuilderStep] = useState<RouteBuilderStep>('pick')
-  const [routeDraftIds, setRouteDraftIds] = useState<string[]>([])
 
   const mapContainerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<any>(null)
   const markersLayerRef = useRef<any>(null)
-  const routeLayerRef = useRef<any>(null)
   const initialSearchDoneRef = useRef(false)
 
-  const groupedSavedPlaces = useMemo(
+  const routeMapContainerRef = useRef<HTMLDivElement | null>(null)
+  const routeMapRef = useRef<any>(null)
+  const routeMapLayerRef = useRef<any>(null)
+  const routeRequestSeqRef = useRef(0)
+
+  const groupedBookmarks = useMemo(
     () =>
-      savedCategoryOrder
+      bookmarkCategories
         .map((group) => ({
           ...group,
-          places: savedPlaces.filter((place) => savedCategoryFor(place) === group.id),
+          places: savedPlaces.filter((place) => bookmarkCategoryFor(place) === group.id),
         }))
         .filter((group) => group.places.length > 0),
     [savedPlaces],
@@ -153,14 +164,6 @@ function App() {
   useEffect(() => {
     localStorage.setItem('trippiece:saved-places', JSON.stringify(savedPlaces))
   }, [savedPlaces])
-
-  useEffect(() => {
-    localStorage.setItem('trippiece:route-stops', JSON.stringify(routeStops))
-  }, [routeStops])
-
-  useEffect(() => {
-    localStorage.setItem('trippiece:route-info', JSON.stringify(routeInfo))
-  }, [routeInfo])
 
   useEffect(() => {
     localStorage.setItem('trippiece:saved-routes', JSON.stringify(savedRoutes))
@@ -280,26 +283,57 @@ function App() {
   }, [places, savedPlaces])
 
   useEffect(() => {
-    const map = mapRef.current
+    if (activeTab !== 'map' || routeEditorOpen) return
+    window.setTimeout(() => mapRef.current?.invalidateSize(), 0)
+  }, [activeTab, routeEditorOpen])
+
+  useEffect(() => {
+    if (!routeEditorOpen || !routeMapContainerRef.current || routeMapRef.current || !window.L) return
+
     const L = window.L
-    if (!map || !L) return
+    const first = routeStops[0]
+    const map = L.map(routeMapContainerRef.current, {
+      zoomControl: false,
+      attributionControl: true,
+    }).setView(
+      first ? [first.lat, first.lng] : [DEFAULT_CENTER.lat, DEFAULT_CENTER.lng],
+      14,
+    )
 
-    if (routeLayerRef.current) {
-      map.removeLayer(routeLayerRef.current)
-      routeLayerRef.current = null
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors',
+    }).addTo(map)
+
+    routeMapRef.current = map
+    routeMapLayerRef.current = L.layerGroup().addTo(map)
+    window.setTimeout(() => map.invalidateSize(), 0)
+
+    return () => {
+      map.remove()
+      routeMapRef.current = null
+      routeMapLayerRef.current = null
     }
+  }, [routeEditorOpen])
 
-    if (!routeInfo?.points.length) return
+  useEffect(() => {
+    if (!routeEditorOpen) return
 
-    const group = L.layerGroup().addTo(map)
-    routeLayerRef.current = group
+    const map = routeMapRef.current
+    const layer = routeMapLayerRef.current
+    const L = window.L
+    if (!map || !layer || !L || routeStops.length === 0) return
 
-    const latLngs = routeInfo.points.map((point) => [point.lat, point.lng])
-    L.polyline(latLngs, {
-      color: '#111111',
-      weight: 5,
-      opacity: 0.9,
-    }).addTo(group)
+    layer.clearLayers()
+
+    if (routeInfo?.points.length) {
+      const latLngs = routeInfo.points.map((point) => [point.lat, point.lng])
+      L.polyline(latLngs, {
+        color: '#191919',
+        weight: 5,
+        opacity: 0.88,
+      }).addTo(layer)
+    }
 
     routeStops.forEach((stop, index) => {
       const icon = L.divIcon({
@@ -308,25 +342,76 @@ function App() {
         iconSize: [34, 34],
         iconAnchor: [17, 17],
       })
-      L.marker([stop.lat, stop.lng], { icon, title: stop.name }).addTo(group)
+      L.marker([stop.lat, stop.lng], { icon, title: stop.name }).addTo(layer)
     })
 
-    if (activeTab === 'map') {
-      map.fitBounds(L.latLngBounds(latLngs).pad(0.12), { maxZoom: 16 })
+    const bounds = L.latLngBounds(routeStops.map((stop) => [stop.lat, stop.lng]))
+    map.fitBounds(bounds.pad(0.22), { maxZoom: 16 })
+  }, [routeEditorOpen, routeStops, routeInfo])
+
+  const calculateRoute = async (stops: Place[]) => {
+    if (stops.length < 2) {
+      setRouteInfo(null)
+      setRouteLoading(false)
+      return
     }
-  }, [routeInfo, routeStops, activeTab])
+
+    const seq = ++routeRequestSeqRef.current
+    setRouteLoading(true)
+    setError('')
+
+    try {
+      const response = await fetch(`${API_BASE}/api/route`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          stops: stops.map(({ name, lat, lng }) => ({ name, lat, lng })),
+        }),
+      })
+
+      const result = await response.json()
+      if (!response.ok) {
+        throw new Error(result.detail || result.error || '동선을 계산하지 못했습니다.')
+      }
+
+      if (seq === routeRequestSeqRef.current) {
+        setRouteInfo(result)
+      }
+    } catch (err) {
+      if (seq === routeRequestSeqRef.current) {
+        setRouteInfo(null)
+        setError(err instanceof Error ? err.message : '동선을 계산하지 못했습니다.')
+      }
+    } finally {
+      if (seq === routeRequestSeqRef.current) {
+        setRouteLoading(false)
+      }
+    }
+  }
 
   useEffect(() => {
-    if (activeTab !== 'map') return
-    window.setTimeout(() => mapRef.current?.invalidateSize(), 0)
-  }, [activeTab])
+    if (!routeEditorOpen) return
+
+    if (routeStops.length < 2) {
+      routeRequestSeqRef.current += 1
+      setRouteInfo(null)
+      setRouteLoading(false)
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      void calculateRoute(routeStops)
+    }, 250)
+
+    return () => window.clearTimeout(timer)
+  }, [routeEditorOpen, routeStops])
 
   const handleSearch = (event: FormEvent) => {
     event.preventDefault()
     void searchPlaces(query, 'all', true)
   }
 
-  const selectCategory = (nextCategory: CategoryId) => {
+  const selectMapCategory = (nextCategory: CategoryId) => {
     setCategory(nextCategory)
     setQuery('')
     void searchPlaces('', nextCategory)
@@ -334,6 +419,7 @@ function App() {
 
   const moveToCurrentLocation = () => {
     if (!navigator.geolocation || !mapRef.current) return
+
     navigator.geolocation.getCurrentPosition((position) => {
       mapRef.current.setView([position.coords.latitude, position.coords.longitude], 16)
       setSearchAreaDirty(true)
@@ -343,62 +429,59 @@ function App() {
   const isSaved = (place: Place) => savedPlaces.some((item) => item.id === place.id)
 
   const toggleSave = (place: Place) => {
-    const removing = savedPlaces.some((item) => item.id === place.id)
-
     setSavedPlaces((current) =>
-      removing
+      current.some((item) => item.id === place.id)
         ? current.filter((item) => item.id !== place.id)
         : [...current, place],
     )
-
-    if (removing) {
-      setRouteDraftIds((current) => current.filter((id) => id !== place.id))
-      setRouteStops((current) => current.filter((item) => item.id !== place.id))
-      setRouteInfo(null)
-    }
+    setSelectedBookmarkIds((current) => current.filter((id) => id !== place.id))
   }
 
-  const openNewRouteBuilder = () => {
+  const startRouteSelection = () => {
     if (savedPlaces.length < 2) {
-      setError('동선을 만들려면 장소를 2곳 이상 저장해주세요.')
+      setError('동선을 만들려면 장소를 2곳 이상 북마크해주세요.')
       return
     }
 
-    setRouteDraftIds([])
-    setRouteStops([])
-    setRouteInfo(null)
-    setRouteBuilderStep('pick')
-    setRouteBuilderOpen(true)
+    setSelectedBookmarkIds([])
+    setBookmarkMode('select')
   }
 
-  const toggleRouteDraft = (placeId: string) => {
-    setRouteDraftIds((current) => {
+  const cancelRouteSelection = () => {
+    setSelectedBookmarkIds([])
+    setBookmarkMode('browse')
+  }
+
+  const toggleBookmarkSelection = (placeId: string) => {
+    setSelectedBookmarkIds((current) => {
       if (current.includes(placeId)) return current.filter((id) => id !== placeId)
       if (current.length >= MAX_ROUTE_STOPS) {
-        setError(`동선에는 최대 ${MAX_ROUTE_STOPS}곳까지 담을 수 있어요.`)
+        setError(`한 동선에는 최대 ${MAX_ROUTE_STOPS}곳까지 담을 수 있어요.`)
         return current
       }
       return [...current, placeId]
     })
   }
 
-  const confirmRouteDraft = () => {
-    if (routeDraftIds.length < 2) {
+  const createRouteFromSelection = () => {
+    if (selectedBookmarkIds.length < 2) {
       setError('장소를 2곳 이상 골라주세요.')
       return
     }
 
-    const nextStops = routeDraftIds
+    const stops = selectedBookmarkIds
       .map((id) => savedPlaces.find((place) => place.id === id))
       .filter((place): place is Place => Boolean(place))
 
-    setRouteStops(nextStops)
+    setRouteStops(stops)
     setRouteInfo(null)
-    setRouteBuilderStep('arrange')
+    setEditingRouteId(null)
+    setRouteOrigin('bookmarks')
+    setBookmarkMode('browse')
+    setRouteEditorOpen(true)
   }
 
   const moveRouteStop = (index: number, direction: -1 | 1) => {
-    setRouteInfo(null)
     setRouteStops((current) => {
       const target = index + direction
       if (target < 0 || target >= current.length) return current
@@ -409,81 +492,69 @@ function App() {
   }
 
   const removeRouteStop = (placeId: string) => {
-    setRouteInfo(null)
     setRouteStops((current) => current.filter((place) => place.id !== placeId))
   }
 
-  const backToRoutePicker = () => {
-    setRouteDraftIds(routeStops.map((place) => place.id))
-    setRouteBuilderStep('pick')
-  }
+  const exitRouteEditor = () => {
+    routeRequestSeqRef.current += 1
+    setRouteEditorOpen(false)
+    setRouteLoading(false)
 
-  const calculateRoute = async () => {
-    if (routeStops.length < 2) return
-    setRouteLoading(true)
-    setError('')
-
-    try {
-      const response = await fetch(`${API_BASE}/api/route`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          stops: routeStops.map(({ name, lat, lng }) => ({ name, lat, lng })),
-        }),
-      })
-
-      const result = await response.json()
-      if (!response.ok) {
-        throw new Error(result.detail || result.error || '동선을 계산하지 못했습니다.')
-      }
-
-      setRouteInfo(result)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '동선을 계산하지 못했습니다.')
-    } finally {
-      setRouteLoading(false)
+    if (routeOrigin === 'bookmarks') {
+      setActiveTab('bookmarks')
+      setBookmarkMode('select')
+      setSelectedBookmarkIds(routeStops.map((stop) => stop.id))
+    } else {
+      setActiveTab('courses')
+      setBookmarkMode('browse')
     }
   }
 
-  const saveCurrentRoute = () => {
-    if (routeStops.length < 2) return
-    const first = routeStops[0]
-    const title = `${first.name} 외 ${routeStops.length - 1}곳`
-    const route: SavedRoute = {
-      id: `${Date.now()}`,
-      title,
+  const saveRoute = () => {
+    if (routeStops.length < 2) {
+      setError('동선에는 장소가 2곳 이상 필요해요.')
+      return
+    }
+
+    const now = new Date().toISOString()
+    const id = editingRouteId ?? `${Date.now()}`
+    const nextRoute: SavedRoute = {
+      id,
+      title: routeTitle(routeStops),
       stops: routeStops,
       routeInfo,
-      createdAt: new Date().toISOString(),
+      createdAt: now,
     }
-    setSavedRoutes((current) => [route, ...current])
-    setRouteBuilderOpen(false)
-    setActiveTab('routes')
+
+    setSavedRoutes((current) => {
+      const withoutCurrent = current.filter((route) => route.id !== id)
+      return [nextRoute, ...withoutCurrent]
+    })
+
+    routeRequestSeqRef.current += 1
+    setEditingRouteId(id)
+    setRouteEditorOpen(false)
+    setRouteLoading(false)
+    setBookmarkMode('browse')
+    setSelectedBookmarkIds([])
+    setActiveTab('courses')
   }
 
-  const loadSavedRoute = (route: SavedRoute) => {
+  const openSavedRoute = (route: SavedRoute) => {
     setRouteStops(route.stops)
     setRouteInfo(route.routeInfo)
-    setRouteDraftIds(route.stops.map((place) => place.id))
-    setRouteBuilderStep('arrange')
-    setRouteBuilderOpen(true)
+    setEditingRouteId(route.id)
+    setRouteOrigin('courses')
+    setRouteEditorOpen(true)
   }
 
-  const showRouteOnMap = () => {
-    setRouteBuilderOpen(false)
-    setActiveTab('map')
-    setSelectedPlace(null)
-  }
-
-  const openCurrentRouteBuilder = () => {
-    setRouteDraftIds(routeStops.map((place) => place.id))
-    setRouteBuilderStep('arrange')
-    setRouteBuilderOpen(true)
+  const deleteSavedRoute = (routeId: string) => {
+    setSavedRoutes((current) => current.filter((route) => route.id !== routeId))
   }
 
   return (
     <div className="app-shell">
-      <section className={`map-screen ${activeTab === 'map' ? 'visible' : ''}`}>
+      <section className={`map-screen ${activeTab === 'map' && !routeEditorOpen ? 'visible' : ''}`}>
         <div ref={mapContainerRef} className="map-canvas" />
 
         <header className="map-header">
@@ -502,18 +573,18 @@ function App() {
               placeholder="장소, 동네, 음식 검색"
             />
             {query && (
-              <button type="button" onClick={() => setQuery('')}>
+              <button type="button" onClick={() => setQuery('')} aria-label="검색어 지우기">
                 ×
               </button>
             )}
           </form>
 
           <div className="category-row">
-            {categories.map((item) => (
+            {mapCategories.map((item) => (
               <button
                 key={item.id}
                 className={category === item.id && !query ? 'active' : ''}
-                onClick={() => selectCategory(item.id)}
+                onClick={() => selectMapCategory(item.id)}
               >
                 {item.label}
               </button>
@@ -531,262 +602,288 @@ function App() {
           {loading ? '장소 찾는 중…' : `${places.length}곳`}
         </div>
 
-        {routeInfo && (
-          <button className="route-summary-pill" onClick={openCurrentRouteBuilder}>
-            동선 {routeStops.length}곳 · {formatDuration(routeInfo.totalTime)} · {formatDistance(routeInfo.totalDistance)}
-          </button>
-        )}
-
         {selectedPlace && (
           <article className="place-sheet">
-            <button className="sheet-close" onClick={() => setSelectedPlace(null)}>×</button>
+            <button className="sheet-close" onClick={() => setSelectedPlace(null)} aria-label="닫기">
+              ×
+            </button>
             <div className="place-sheet-main">
-              <div className="place-meta">{selectedPlace.categoryGroup || selectedPlace.category.split(' > ').slice(-1)[0]}</div>
+              <div className="place-meta">
+                {selectedPlace.categoryGroup || selectedPlace.category.split(' > ').slice(-1)[0] || '장소'}
+              </div>
               <h2>{selectedPlace.name}</h2>
               <p>{selectedPlace.address}</p>
-              {selectedPlace.distance != null && <small>현재 지도 중심에서 {formatDistance(selectedPlace.distance)}</small>}
+              {selectedPlace.distance != null && (
+                <small>현재 지도 중심에서 {formatDistance(selectedPlace.distance)}</small>
+              )}
             </div>
 
-            <button className={`save-place-button ${isSaved(selectedPlace) ? 'selected' : ''}`} onClick={() => toggleSave(selectedPlace)}>
-              {isSaved(selectedPlace) ? '♥ 저장됨' : '♡ 저장하기'}
+            <button
+              className={`bookmark-main-button ${isSaved(selectedPlace) ? 'saved' : ''}`}
+              onClick={() => toggleSave(selectedPlace)}
+            >
+              {isSaved(selectedPlace) ? '♥ 북마크됨' : '♡ 북마크'}
             </button>
 
             <a className="kakao-link" href={selectedPlace.url} target="_blank" rel="noreferrer">
-              카카오맵 상세 보기 ↗
+              카카오맵에서 보기 ↗
             </a>
           </article>
         )}
       </section>
 
-      {activeTab !== 'map' && (
+      {!routeEditorOpen && activeTab !== 'map' && (
         <main className="content-screen">
-          <header className="content-header">
-            <strong>trippiece</strong>
-            <span>{activeTab === 'saved' ? '저장' : '내 코스'}</span>
-          </header>
+          {activeTab === 'bookmarks' && (
+            <>
+              <header className="simple-header">
+                {bookmarkMode === 'select' ? (
+                  <>
+                    <button onClick={cancelRouteSelection}>취소</button>
+                    <strong>장소 선택</strong>
+                    <span>{selectedBookmarkIds.length}/{MAX_ROUTE_STOPS}</span>
+                  </>
+                ) : (
+                  <>
+                    <strong>북마크</strong>
+                    <span>{savedPlaces.length}</span>
+                  </>
+                )}
+              </header>
 
-          {activeTab === 'saved' && (
-            <section className={`content-body ${savedPlaces.length >= 2 ? 'with-sticky-cta' : ''}`}>
-              <div className="section-heading">
-                <div>
-                  <p>PLACE LIBRARY</p>
-                  <h1>저장한 장소</h1>
-                </div>
-                <span>{savedPlaces.length}</span>
-              </div>
+              <section className={`bookmark-page ${bookmarkMode === 'select' ? 'selecting' : ''}`}>
+                {savedPlaces.length === 0 ? (
+                  <div className="empty-state">
+                    <h2>아직 북마크가 없어요.</h2>
+                    <p>지도에서 마음에 드는 장소를 저장해두세요.</p>
+                    <button onClick={() => setActiveTab('map')}>지도에서 찾기</button>
+                  </div>
+                ) : (
+                  <div className="bookmark-groups">
+                    {groupedBookmarks.map((group) => (
+                      <section className="bookmark-group" key={group.id}>
+                        <div className="bookmark-group-title">
+                          <h2>{group.label}</h2>
+                          <span>{group.places.length}</span>
+                        </div>
 
-              {savedPlaces.length === 0 ? (
-                <div className="empty-state">
-                  <h2>아직 저장한 장소가 없어요.</h2>
-                  <p>지도에서 마음에 드는 장소를 저장하면 카테고리별로 자동 정리돼요.</p>
-                  <button onClick={() => setActiveTab('map')}>지도에서 찾기</button>
-                </div>
-              ) : (
-                <div className="saved-category-list">
-                  {groupedSavedPlaces.map((group) => (
-                    <section key={group.id} className="saved-category-section">
-                      <header>
-                        <h2>{group.label}</h2>
-                        <span>{group.places.length}</span>
-                      </header>
+                        <div className="bookmark-list">
+                          {group.places.map((place) => {
+                            const selected = selectedBookmarkIds.includes(place.id)
+                            return (
+                              <article
+                                className={`bookmark-card ${selected ? 'selected' : ''}`}
+                                key={place.id}
+                                onClick={() => bookmarkMode === 'select' && toggleBookmarkSelection(place.id)}
+                              >
+                                {bookmarkMode === 'select' && (
+                                  <button
+                                    className="select-circle"
+                                    onClick={(event) => {
+                                      event.stopPropagation()
+                                      toggleBookmarkSelection(place.id)
+                                    }}
+                                    aria-label={`${place.name} 선택`}
+                                  >
+                                    {selected ? '✓' : ''}
+                                  </button>
+                                )}
 
-                      <div className="place-list">
-                        {group.places.map((place) => (
-                          <article key={place.id} className="place-list-item">
-                            <div>
-                              <small>{place.categoryGroup || group.label}</small>
-                              <h3>{place.name}</h3>
-                              <p>{place.address}</p>
-                            </div>
-                            <button className="remove-save-button" onClick={() => toggleSave(place)} aria-label={`${place.name} 저장 해제`}>
-                              ♥
-                            </button>
-                          </article>
-                        ))}
-                      </div>
-                    </section>
-                  ))}
+                                <div className="bookmark-card-copy">
+                                  <small>{place.categoryGroup || group.label}</small>
+                                  <h3>{place.name}</h3>
+                                  <p>{place.address}</p>
+                                </div>
+
+                                {bookmarkMode === 'browse' && (
+                                  <button
+                                    className="heart-button"
+                                    onClick={() => toggleSave(place)}
+                                    aria-label={`${place.name} 북마크 해제`}
+                                  >
+                                    ♥
+                                  </button>
+                                )}
+                              </article>
+                            )
+                          })}
+                        </div>
+                      </section>
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              {savedPlaces.length > 0 && bookmarkMode === 'browse' && (
+                <div className="sticky-cta">
+                  <button onClick={startRouteSelection} disabled={savedPlaces.length < 2}>
+                    동선 만들기
+                  </button>
                 </div>
               )}
-            </section>
+
+              {bookmarkMode === 'select' && (
+                <div className="selection-cta">
+                  <div>
+                    <strong>{selectedBookmarkIds.length}곳 선택</strong>
+                    <span>카테고리를 보며 원하는 장소를 골라주세요.</span>
+                  </div>
+                  <button onClick={createRouteFromSelection} disabled={selectedBookmarkIds.length < 2}>
+                    다음
+                  </button>
+                </div>
+              )}
+            </>
           )}
 
-          {activeTab === 'routes' && (
-            <section className="content-body">
-              <div className="section-heading">
-                <div>
-                  <p>MY ROUTES</p>
-                  <h1>내 코스</h1>
-                </div>
+          {activeTab === 'courses' && (
+            <>
+              <header className="simple-header">
+                <strong>내 코스</strong>
                 <span>{savedRoutes.length}</span>
-              </div>
+              </header>
 
-              {savedRoutes.length === 0 ? (
-                <div className="empty-state">
-                  <h2>저장한 코스가 없어요.</h2>
-                  <p>저장한 장소에서 원하는 곳을 골라 동선을 만들어보세요.</p>
-                  <button onClick={() => setActiveTab('saved')}>저장한 장소 보기</button>
-                </div>
-              ) : (
-                <div className="saved-route-list">
-                  {savedRoutes.map((route) => (
-                    <article key={route.id} className="saved-route-card">
-                      <small>{new Date(route.createdAt).toLocaleDateString('ko-KR')}</small>
-                      <h3>{route.title}</h3>
-                      <p>{route.stops.map((stop) => stop.name).join(' → ')}</p>
-                      {route.routeInfo && (
-                        <div className="saved-route-meta">
-                          {formatDistance(route.routeInfo.totalDistance)} · {formatDuration(route.routeInfo.totalTime)}
+              <section className="courses-page">
+                {savedRoutes.length === 0 ? (
+                  <div className="empty-state">
+                    <h2>아직 만든 코스가 없어요.</h2>
+                    <p>북마크한 장소를 골라 첫 동선을 만들어보세요.</p>
+                    <button onClick={() => setActiveTab('bookmarks')}>북마크 보기</button>
+                  </div>
+                ) : (
+                  <div className="course-list">
+                    {savedRoutes.map((route) => (
+                      <article className="course-card" key={route.id}>
+                        <small>{new Date(route.createdAt).toLocaleDateString('ko-KR')}</small>
+                        <h2>{route.title}</h2>
+                        <p>{route.stops.map((stop) => stop.name).join(' → ')}</p>
+                        {route.routeInfo && (
+                          <div className="course-meta">
+                            {formatDistance(route.routeInfo.totalDistance)} · 도보 {formatDuration(route.routeInfo.totalTime)}
+                          </div>
+                        )}
+                        <div className="course-card-actions">
+                          <button className="open-course" onClick={() => openSavedRoute(route)}>
+                            코스 열기
+                          </button>
+                          <button className="delete-course" onClick={() => deleteSavedRoute(route.id)}>
+                            삭제
+                          </button>
                         </div>
-                      )}
-                      <button onClick={() => loadSavedRoute(route)}>코스 열기</button>
-                    </article>
-                  ))}
-                </div>
-              )}
-            </section>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </section>
+            </>
           )}
         </main>
       )}
 
-      {activeTab === 'saved' && savedPlaces.length >= 2 && !routeBuilderOpen && (
-        <div className="saved-sticky-cta">
-          <button onClick={openNewRouteBuilder}>동선 만들기</button>
-        </div>
-      )}
+      {routeEditorOpen && (
+        <main className="route-editor">
+          <header className="route-editor-header">
+            <button onClick={exitRouteEditor}>
+              ← {routeOrigin === 'bookmarks' ? '장소 선택' : '내 코스'}
+            </button>
+            <strong>동선 만들기</strong>
+            <span>{routeStops.length}곳</span>
+          </header>
 
-      {routeBuilderOpen && (
-        <div className="route-builder-layer">
-          <section className="route-builder-sheet">
-            <header className="route-builder-header">
-              <button onClick={() => setRouteBuilderOpen(false)} aria-label="닫기">×</button>
-              <div>
-                <small>{routeBuilderStep === 'pick' ? 'STEP 1' : 'STEP 2'}</small>
-                <h1>{routeBuilderStep === 'pick' ? '어디를 갈까?' : '어떤 순서로 갈까?'}</h1>
-                <p>
-                  {routeBuilderStep === 'pick'
-                    ? '저장한 장소에서 이번 데이트에 갈 곳을 골라주세요.'
-                    : '방문 순서를 정한 뒤 실제 도보 동선을 계산할 수 있어요.'}
-                </p>
-              </div>
-            </header>
+          <div className="route-map-wrap">
+            <div ref={routeMapContainerRef} className="route-map" />
+            <div className="route-map-status">
+              {routeLoading
+                ? '동선 계산 중…'
+                : routeInfo
+                  ? `${formatDistance(routeInfo.totalDistance)} · 도보 ${formatDuration(routeInfo.totalTime)}`
+                  : routeStops.length < 2
+                    ? '장소를 2곳 이상 남겨주세요.'
+                    : '동선을 불러오지 못했습니다.'}
+            </div>
+          </div>
 
-            {routeBuilderStep === 'pick' ? (
-              <div className="route-picker-body">
-                {groupedSavedPlaces.map((group) => (
-                  <section key={group.id} className="route-picker-group">
-                    <header>
-                      <h2>{group.label}</h2>
-                      <span>{group.places.length}</span>
-                    </header>
-                    <div>
-                      {group.places.map((place) => {
-                        const selected = routeDraftIds.includes(place.id)
-                        const selectedOrder = selected ? routeDraftIds.indexOf(place.id) + 1 : null
-                        return (
-                          <button
-                            key={place.id}
-                            className={`route-picker-row ${selected ? 'selected' : ''}`}
-                            onClick={() => toggleRouteDraft(place.id)}
-                          >
-                            <span className="picker-check">{selectedOrder ?? ''}</span>
-                            <span className="picker-copy">
-                              <strong>{place.name}</strong>
-                              <small>{place.address}</small>
-                            </span>
-                          </button>
-                        )
-                      })}
-                    </div>
-                  </section>
-                ))}
-              </div>
-            ) : (
-              <div className="route-arrange-body">
-                <button className="back-to-picker" onClick={backToRoutePicker}>← 장소 다시 고르기</button>
-
-                <ol className="route-list">
-                  {routeStops.map((place, index) => (
-                    <li key={place.id}>
-                      <div className="route-index">{index + 1}</div>
-                      <div className="route-place">
-                        <small>{savedCategoryOrder.find((group) => group.id === savedCategoryFor(place))?.label || '장소'}</small>
-                        <h3>{place.name}</h3>
-                        {routeInfo?.legs[index] && (
-                          <p>
-                            다음 장소까지 {formatDistance(routeInfo.legs[index].distance)} · {formatDuration(routeInfo.legs[index].time)}
-                          </p>
-                        )}
-                      </div>
-                      <div className="reorder-buttons">
-                        <button onClick={() => moveRouteStop(index, -1)} disabled={index === 0}>↑</button>
-                        <button onClick={() => moveRouteStop(index, 1)} disabled={index === routeStops.length - 1}>↓</button>
-                        <button onClick={() => removeRouteStop(place.id)}>×</button>
-                      </div>
-                    </li>
-                  ))}
-                </ol>
-
-                {routeInfo && (
-                  <div className="route-result">
-                    <div>
-                      <small>총 이동</small>
-                      <strong>{formatDistance(routeInfo.totalDistance)}</strong>
-                    </div>
-                    <div>
-                      <small>예상 도보</small>
-                      <strong>{formatDuration(routeInfo.totalTime)}</strong>
-                    </div>
-                    <button onClick={showRouteOnMap}>지도에서 보기</button>
-                    {routeInfo.landingUrl && (
-                      <a href={routeInfo.landingUrl} target="_blank" rel="noreferrer">카카오맵 길찾기 ↗</a>
+          <section className="route-editor-body">
+            <ol className="route-stop-list">
+              {routeStops.map((place, index) => (
+                <li key={place.id}>
+                  <div className="route-order">{index + 1}</div>
+                  <div className="route-stop-copy">
+                    <small>{bookmarkCategories.find((group) => group.id === bookmarkCategoryFor(place))?.label}</small>
+                    <h3>{place.name}</h3>
+                    {routeInfo?.legs[index] && index < routeStops.length - 1 && (
+                      <p>
+                        다음 장소까지 {formatDistance(routeInfo.legs[index].distance)} · {formatDuration(routeInfo.legs[index].time)}
+                      </p>
                     )}
                   </div>
-                )}
-              </div>
-            )}
-
-            <footer className="route-builder-footer">
-              {routeBuilderStep === 'pick' ? (
-                <>
-                  <span>{routeDraftIds.length}곳 선택</span>
-                  <button className="primary-action" onClick={confirmRouteDraft} disabled={routeDraftIds.length < 2}>
-                    순서 정하기
-                  </button>
-                </>
-              ) : (
-                <>
-                  <button className="primary-action" onClick={() => void calculateRoute()} disabled={routeLoading || routeStops.length < 2}>
-                    {routeLoading ? '도보 동선 계산 중…' : routeInfo ? '동선 다시 계산' : '실제 도보 동선 계산'}
-                  </button>
-                  {routeInfo && (
-                    <button className="secondary-action" onClick={saveCurrentRoute}>현재 동선 저장</button>
-                  )}
-                </>
-              )}
-            </footer>
+                  <div className="route-stop-actions">
+                    <button onClick={() => moveRouteStop(index, -1)} disabled={index === 0} aria-label="위로 이동">
+                      ↑
+                    </button>
+                    <button
+                      onClick={() => moveRouteStop(index, 1)}
+                      disabled={index === routeStops.length - 1}
+                      aria-label="아래로 이동"
+                    >
+                      ↓
+                    </button>
+                    <button onClick={() => removeRouteStop(place.id)} aria-label="장소 제거">
+                      ×
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ol>
           </section>
-        </div>
+
+          <div className="route-save-bar">
+            <div>
+              <small>총 이동</small>
+              <strong>
+                {routeLoading
+                  ? '계산 중'
+                  : routeInfo
+                    ? `${formatDistance(routeInfo.totalDistance)} · ${formatDuration(routeInfo.totalTime)}`
+                    : '—'}
+              </strong>
+            </div>
+            <button onClick={saveRoute} disabled={routeStops.length < 2 || routeLoading}>
+              동선 저장
+            </button>
+          </div>
+        </main>
       )}
 
       {error && (
-        <div className="toast" onClick={() => setError('')}>
+        <button className="toast" onClick={() => setError('')}>
           {error}
-        </div>
+        </button>
       )}
 
-      <nav className="bottom-nav">
-        <button className={activeTab === 'map' ? 'active' : ''} onClick={() => setActiveTab('map')}>
-          <span>⌖</span>지도
-        </button>
-        <button className={activeTab === 'saved' ? 'active' : ''} onClick={() => setActiveTab('saved')}>
-          <span>♡</span>저장
-          {savedPlaces.length > 0 && <b>{savedPlaces.length}</b>}
-        </button>
-        <button className={activeTab === 'routes' ? 'active' : ''} onClick={() => setActiveTab('routes')}>
-          <span>☰</span>내 코스
-        </button>
-      </nav>
+      {!routeEditorOpen && (
+        <nav className="bottom-nav">
+          <button className={activeTab === 'map' ? 'active' : ''} onClick={() => setActiveTab('map')}>
+            <span>⌖</span>
+            지도
+          </button>
+          <button
+            className={activeTab === 'bookmarks' ? 'active' : ''}
+            onClick={() => {
+              setBookmarkMode('browse')
+              setActiveTab('bookmarks')
+            }}
+          >
+            <span>♡</span>
+            북마크
+            {savedPlaces.length > 0 && <b>{savedPlaces.length}</b>}
+          </button>
+          <button className={activeTab === 'courses' ? 'active' : ''} onClick={() => setActiveTab('courses')}>
+            <span>☰</span>
+            코스
+          </button>
+        </nav>
+      )}
     </div>
   )
 }
