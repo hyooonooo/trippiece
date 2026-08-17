@@ -6,24 +6,29 @@
     "Apple SD Gothic Neo",
     "Noto Sans KR",
     sans-serif;
-  color: #171717;
-  background: #f7f7f5;
+  color: #151515;
+  background: #f6f6f3;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
 }
 
-html {
-  background: #f7f7f5;
+html,
+body,
+#root {
+  width: 100%;
+  min-width: 320px;
+  min-height: 100%;
+  margin: 0;
+}
+
+html,
+body {
+  height: 100%;
+  overflow-x: hidden;
+  background: #f6f6f3;
 }
 
 body {
-  min-width: 320px;
-  min-height: 100vh;
-  margin: 0;
-  background: #f7f7f5;
-}
-
-#root {
-  min-height: 100vh;
+  min-height: 100dvh;
 }
